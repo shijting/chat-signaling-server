@@ -93,7 +93,7 @@ Type a message and press Enter to send.`)
 		webrtcConfig: webrtc.Configuration{
 			ICEServers: []webrtc.ICEServer{
 				{
-					URLs: []string{"stun:nhz.jeffthecoder.xyz:3478", "stun:nhz.jeffthecoder.xyz:3479"},
+					URLs: []string{"stun:https://sjt0510.pagekite.me"},
 				},
 			},
 		},
@@ -190,7 +190,7 @@ func (client *SignalClient) View() string {
 
 func (client *SignalClient) ConnectServer(ctx context.Context) {
 	client.Program.Send(systemMsg("Dialing to server..."))
-	grpcClient, err := grpc.Dial("127.0.0.1:4444", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	grpcClient, err := grpc.Dial("127.0.0.1:6666", grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		panic(err)
 	}
