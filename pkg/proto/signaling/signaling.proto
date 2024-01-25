@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package signaling;
+
+// 信令
+option go_package = "github.com/shijting/chat-signaling-server/pkg/proto/signaling";
+
+import "google/protobuf/empty.proto";
+
+enum SDPMessageType {
+  Video = 0;
+  Audio = 1;
+  VideoAudio = 2;
+  Data = 3;
+}
+
+message SDPMessage {
+  string SDP = 1;
+  SDPMessageType Type = 2;
+  string Sender = 3;
+}
+
+
+message SignalingMessage {
+  string Room = 1;
+  string Sender = 2;
+  optional string Receiver = 3;
+  oneof Message {
+    google.protobuf.Empty Bootstrap = 10;
+    google.protobuf.Empty DiscoverRequest = 11;
+    google.protobuf.Empty DiscoverResponse = 12;
+
+    SDPMessage SessionOffer = 13;
+    SDPMessage SessionAnswer = 14;
+  };
+}
+
+service Signaling {
+  rpc Biu(stream SignalingMessage) returns (stream SignalingMessage);
+}
