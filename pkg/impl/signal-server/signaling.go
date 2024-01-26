@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	proto "github.com/shijting/chat-signaling-server/pkg/proto/signaling"
 	"io"
 	"log"
 	"strings"
-
-	proto "github.com/shijting/chat-signaling-server/pkg/proto/signaling"
 
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/errgroup"
@@ -51,9 +51,11 @@ func (signalingServer SignalingServer) handleStream(ctx context.Context, errGrou
 		for {
 			msg, err := stream.Recv()
 			if err == io.EOF {
+				log.Println("handleStream EOF")
 				return nil
 			}
 			if err != nil {
+				log.Println("handleStream error:", err)
 				return err
 			}
 
@@ -102,15 +104,19 @@ func (signalingServer SignalingServer) handleStream(ctx context.Context, errGrou
 
 func (signalingServer SignalingServer) handleRedisPubSub(ctx context.Context, name, room string, stream proto.Signaling_BiuServer) func() error {
 	return func() error {
+		fmt.Println("handleRedisPubSub ", name, room)
 		pubsub := signalingServer.redis.Subscribe(ctx,
 			signalingServer.redisKeyPrefix+":"+room+":discover",
 			signalingServer.redisKeyPrefix+":"+room+":discover:"+name,
 			signalingServer.redisKeyPrefix+":"+room+":offer:"+name,
 			signalingServer.redisKeyPrefix+":"+room+":answer:"+name,
 		)
+
 		defer func() {
 			_ = pubsub.Unsubscribe(ctx)
 			_ = pubsub.Close()
+			fmt.Println("handleRedisPubSub unsubscribe ", name, room)
+			fmt.Println("aaaaaaaaa")
 		}()
 
 		if err := stream.Send(&proto.SignalingMessage{
@@ -122,64 +128,68 @@ func (signalingServer SignalingServer) handleRedisPubSub(ctx context.Context, na
 		}
 
 		ch := pubsub.Channel()
-		for msg := range ch {
-			switch msg.Channel {
-			case signalingServer.redisKeyPrefix + ":" + room + ":discover":
-				if err := stream.Send(&proto.SignalingMessage{
-					Room:    room,
-					Sender:  msg.Payload,
-					Message: &proto.SignalingMessage_DiscoverRequest{},
-				}); err != nil {
-					return err
-				}
-			case signalingServer.redisKeyPrefix + ":" + room + ":discover:" + name:
-				if msg.Payload == name {
-					continue
-				}
-				if err := stream.Send(&proto.SignalingMessage{
-					Room:     room,
-					Sender:   msg.Payload,
-					Receiver: &name,
-					Message:  &proto.SignalingMessage_DiscoverResponse{},
-				}); err != nil {
-					return err
-				}
-			case signalingServer.redisKeyPrefix + ":" + room + ":offer:" + name:
-				sdpMessage := &proto.SDPMessage{}
-				if err := json.NewDecoder(strings.NewReader(msg.Payload)).Decode(sdpMessage); err != nil {
-					return err
-				}
+		for {
+			select {
+			case <-ctx.Done():
+				// 退出
+				return nil
+			case msg := <-ch:
+				switch msg.Channel {
+				case signalingServer.redisKeyPrefix + ":" + room + ":discover":
+					if err := stream.Send(&proto.SignalingMessage{
+						Room:    room,
+						Sender:  msg.Payload,
+						Message: &proto.SignalingMessage_DiscoverRequest{},
+					}); err != nil {
+						return err
+					}
+				case signalingServer.redisKeyPrefix + ":" + room + ":discover:" + name:
+					if msg.Payload == name {
+						continue
+					}
+					if err := stream.Send(&proto.SignalingMessage{
+						Room:     room,
+						Sender:   msg.Payload,
+						Receiver: &name,
+						Message:  &proto.SignalingMessage_DiscoverResponse{},
+					}); err != nil {
+						return err
+					}
+				case signalingServer.redisKeyPrefix + ":" + room + ":offer:" + name:
+					sdpMessage := &proto.SDPMessage{}
+					if err := json.NewDecoder(strings.NewReader(msg.Payload)).Decode(sdpMessage); err != nil {
+						return err
+					}
 
-				if err := stream.Send(&proto.SignalingMessage{
-					Room:     room,
-					Sender:   sdpMessage.Sender,
-					Receiver: &name,
-					Message: &proto.SignalingMessage_SessionOffer{
-						SessionOffer: sdpMessage,
-					},
-				}); err != nil {
-					return err
-				}
-			case signalingServer.redisKeyPrefix + ":" + room + ":answer:" + name:
-				sdpMessage := &proto.SDPMessage{}
-				if err := json.NewDecoder(strings.NewReader(msg.Payload)).Decode(sdpMessage); err != nil {
-					return err
-				}
+					if err := stream.Send(&proto.SignalingMessage{
+						Room:     room,
+						Sender:   sdpMessage.Sender,
+						Receiver: &name,
+						Message: &proto.SignalingMessage_SessionOffer{
+							SessionOffer: sdpMessage,
+						},
+					}); err != nil {
+						return err
+					}
+				case signalingServer.redisKeyPrefix + ":" + room + ":answer:" + name:
+					sdpMessage := &proto.SDPMessage{}
+					if err := json.NewDecoder(strings.NewReader(msg.Payload)).Decode(sdpMessage); err != nil {
+						return err
+					}
 
-				if err := stream.Send(&proto.SignalingMessage{
-					Room:     room,
-					Sender:   sdpMessage.Sender,
-					Receiver: &name,
-					Message: &proto.SignalingMessage_SessionAnswer{
-						SessionAnswer: sdpMessage,
-					},
-				}); err != nil {
-					return err
+					if err := stream.Send(&proto.SignalingMessage{
+						Room:     room,
+						Sender:   sdpMessage.Sender,
+						Receiver: &name,
+						Message: &proto.SignalingMessage_SessionAnswer{
+							SessionAnswer: sdpMessage,
+						},
+					}); err != nil {
+						return err
+					}
 				}
 			}
 		}
-
-		return nil
 	}
 }
 
@@ -191,5 +201,7 @@ func (signalingServer SignalingServer) Biu(stream proto.Signaling_BiuServer) err
 
 	errGroup.Go(signalingServer.handleStream(ctx, errGroup, stream))
 
-	return errGroup.Wait()
+	err := errGroup.Wait()
+	fmt.Println("errGroup.Wait() err:", err)
+	return err
 }
