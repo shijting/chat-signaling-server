@@ -104,7 +104,6 @@ func (signalingServer SignalingServer) handleStream(ctx context.Context, errGrou
 
 func (signalingServer SignalingServer) handleRedisPubSub(ctx context.Context, name, room string, stream proto.Signaling_BiuServer) func() error {
 	return func() error {
-		fmt.Println("handleRedisPubSub ", name, room)
 		pubsub := signalingServer.redis.Subscribe(ctx,
 			signalingServer.redisKeyPrefix+":"+room+":discover",
 			signalingServer.redisKeyPrefix+":"+room+":discover:"+name,
@@ -115,8 +114,6 @@ func (signalingServer SignalingServer) handleRedisPubSub(ctx context.Context, na
 		defer func() {
 			_ = pubsub.Unsubscribe(ctx)
 			_ = pubsub.Close()
-			fmt.Println("handleRedisPubSub unsubscribe ", name, room)
-			fmt.Println("aaaaaaaaa")
 		}()
 
 		if err := stream.Send(&proto.SignalingMessage{
