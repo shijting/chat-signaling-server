@@ -3,10 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"sync"
 
@@ -15,8 +16,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	proto "github.com/shijting/chat-signaling-server/pkg/proto/signaling"
+	"github.com/spf13/cobra"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/pion/webrtc/v3"
@@ -42,6 +45,8 @@ var (
 	StyleError        = lipgloss.NewStyle().Foreground(lipgloss.Color("red"))
 	StylePeer         = lipgloss.NewStyle()
 	StylePeerSelected = lipgloss.NewStyle().Background(lipgloss.Color("gray"))
+
+	dataChannelName = "chat"
 )
 
 type SignalClient struct {
@@ -49,6 +54,9 @@ type SignalClient struct {
 	Program *tea.Program
 
 	webrtcConfig webrtc.Configuration
+
+	Server     string
+	Credential credentials.TransportCredentials
 
 	Room string
 	Name string
@@ -67,7 +75,7 @@ type SignalClient struct {
 	Lock      sync.Locker
 }
 
-func New(room, name string) *SignalClient {
+func New(server, room string, iceServers []string) *SignalClient {
 	ta := textarea.New()
 	ta.Prompt = "Send a message"
 	ta.Focus()
@@ -84,6 +92,24 @@ Type a message and press Enter to send.`)
 
 	ta.KeyMap.InsertNewline.SetEnabled(false)
 
+	transportCredential := insecure.NewCredentials()
+	parsedUrl, err := url.Parse(server)
+	if err != nil {
+		panic(err)
+	}
+	port := parsedUrl.Port()
+	if parsedUrl.Scheme == "https" {
+		transportCredential = credentials.NewTLS(&tls.Config{})
+	}
+	if port == "" {
+		switch parsedUrl.Scheme {
+		case "https":
+			port = "443"
+		default:
+			port = "80"
+		}
+	}
+
 	client := &SignalClient{
 		UI: SignalClientUI{
 			viewport: vp,
@@ -93,13 +119,15 @@ Type a message and press Enter to send.`)
 		webrtcConfig: webrtc.Configuration{
 			ICEServers: []webrtc.ICEServer{
 				{
-					URLs: []string{"stun:https://sjt0510.pagekite.me"},
+					URLs: iceServers,
 				},
 			},
 		},
 
+		Server:     fmt.Sprintf("%v:%v", parsedUrl.Hostname(), port),
+		Credential: transportCredential,
+
 		Room: room,
-		Name: name,
 
 		PeerConns: make(map[string]*webrtc.PeerConnection),
 		Channels:  make(map[string]*webrtc.DataChannel),
@@ -190,7 +218,7 @@ func (client *SignalClient) View() string {
 
 func (client *SignalClient) ConnectServer(ctx context.Context) {
 	client.Program.Send(systemMsg("Dialing to server..."))
-	grpcClient, err := grpc.Dial("127.0.0.1:6666", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	grpcClient, err := grpc.Dial(client.Server, grpc.WithTransportCredentials(client.Credential))
 	if err != nil {
 		panic(err)
 	}
@@ -209,13 +237,11 @@ func (client *SignalClient) ConnectServer(ctx context.Context) {
 func (client *SignalClient) HandleConnection(ctx context.Context, grpcClient *grpc.ClientConn, stream proto.Signaling_BiuClient) {
 	defer grpcClient.Close()
 	room := client.Room
-	clientId := client.Name
 
 	client.Program.Send(systemMsg("Waiting for server to be bootstrapped."))
 
 	stream.Send(&proto.SignalingMessage{
 		Room:    room,
-		Sender:  clientId,
 		Message: &proto.SignalingMessage_Bootstrap{},
 	})
 
@@ -231,13 +257,13 @@ func (client *SignalClient) HandleConnection(ctx context.Context, grpcClient *gr
 		}
 		switch inner := msg.Message.(type) {
 		case *proto.SignalingMessage_Bootstrap:
-			client.OnBootstrapReady(ctx, stream, room, clientId)
+			client.OnBootstrapReady(ctx, stream, room, msg.Sender)
 		case *proto.SignalingMessage_DiscoverRequest:
-			client.OnDiscoverRequest(ctx, stream, room, clientId, msg.Sender)
+			client.OnDiscoverRequest(ctx, stream, room, msg.Sender)
 		case *proto.SignalingMessage_DiscoverResponse:
-			client.OnDiscoverResponse(ctx, stream, room, clientId, msg.Sender)
+			client.OnDiscoverResponse(ctx, stream, room, msg.Sender)
 		case *proto.SignalingMessage_SessionOffer:
-			client.OnOffer(ctx, stream, room, clientId, msg.Sender, inner.SessionOffer.SDP)
+			client.OnOffer(ctx, stream, room, msg.Sender, inner.SessionOffer.SDP)
 		case *proto.SignalingMessage_SessionAnswer:
 			client.OnAnswer(ctx, msg.Sender, inner.SessionAnswer.SDP)
 		}
@@ -245,32 +271,34 @@ func (client *SignalClient) HandleConnection(ctx context.Context, grpcClient *gr
 }
 
 func (client *SignalClient) OnBootstrapReady(ctx context.Context, stream proto.Signaling_BiuClient, room, name string) {
+	client.Name = name
+
 	client.Program.Send(systemMsg("Server ready!"))
 	stream.Send(&proto.SignalingMessage{
 		Room:    room,
-		Sender:  name,
+		Sender:  client.Name,
 		Message: &proto.SignalingMessage_DiscoverRequest{},
 	})
 }
 
-func (client *SignalClient) OnDiscoverRequest(ctx context.Context, stream proto.Signaling_BiuClient, room, name, sender string) {
+func (client *SignalClient) OnDiscoverRequest(ctx context.Context, stream proto.Signaling_BiuClient, room, sender string) {
 	client.Program.Send(systemMsg("Client " + sender + " is joining into the room " + room))
 	stream.Send(&proto.SignalingMessage{
 		Room:     room,
-		Sender:   name,
+		Sender:   client.Name,
 		Receiver: &sender,
 		Message:  &proto.SignalingMessage_DiscoverResponse{},
 	})
 }
 
-func (client *SignalClient) OnDiscoverResponse(ctx context.Context, stream proto.Signaling_BiuClient, room, name, sender string) {
+func (client *SignalClient) OnDiscoverResponse(ctx context.Context, stream proto.Signaling_BiuClient, room, sender string) {
 	client.Program.Send(systemMsg("Client " + sender + " ponged"))
 
 	peerConnection, err := client.GetOrCreatePeerConnection(sender)
 	if err != nil {
 		return
 	}
-	dataChannel, err := peerConnection.CreateDataChannel("chan", nil)
+	dataChannel, err := peerConnection.CreateDataChannel(dataChannelName, nil)
 	if err != nil {
 		client.Program.Send(systemMsg(fmt.Sprint("failed to create answer: ", err)))
 		return
@@ -286,8 +314,11 @@ func (client *SignalClient) OnDiscoverResponse(ctx context.Context, stream proto
 	}
 	peerConnection.SetLocalDescription(sdp)
 
+	gatherComplete := webrtc.GatheringCompletePromise(peerConnection)
+	<-gatherComplete
+
 	buffer := &bytes.Buffer{}
-	if err := json.NewEncoder(buffer).Encode(sdp); err != nil {
+	if err := json.NewEncoder(buffer).Encode(peerConnection.LocalDescription()); err != nil {
 		client.Program.Send(systemMsg(fmt.Sprint("Failed to encode offer for peer "+sender+": ", err)))
 		peerConnection.Close()
 		return
@@ -297,19 +328,19 @@ func (client *SignalClient) OnDiscoverResponse(ctx context.Context, stream proto
 
 	stream.Send(&proto.SignalingMessage{
 		Room:     room,
-		Sender:   name,
+		Sender:   client.Name,
 		Receiver: &sender,
 		Message: &proto.SignalingMessage_SessionOffer{
 			SessionOffer: &proto.SDPMessage{
 				SDP:    buffer.String(),
 				Type:   proto.SDPMessageType_Data,
-				Sender: name,
+				Sender: client.Name,
 			},
 		},
 	})
 }
 
-func (client *SignalClient) OnOffer(ctx context.Context, stream proto.Signaling_BiuClient, room, name, sender, sdp string) {
+func (client *SignalClient) OnOffer(ctx context.Context, stream proto.Signaling_BiuClient, room, sender, sdp string) {
 	client.Program.Send(systemMsg("Client " + sender + " is offering"))
 
 	peerConnection, err := client.GetOrCreatePeerConnection(sender)
@@ -341,13 +372,13 @@ func (client *SignalClient) OnOffer(ctx context.Context, stream proto.Signaling_
 
 	stream.Send(&proto.SignalingMessage{
 		Room:     room,
-		Sender:   name,
+		Sender:   client.Name,
 		Receiver: &sender,
 		Message: &proto.SignalingMessage_SessionAnswer{
 			SessionAnswer: &proto.SDPMessage{
 				SDP:    buffer.String(),
 				Type:   proto.SDPMessageType_Data,
-				Sender: name,
+				Sender: client.Name,
 			},
 		},
 	})
@@ -404,6 +435,9 @@ func (client SignalClient) GetOrCreatePeerConnection(sender string) (*webrtc.Pee
 
 	peerConnection.OnDataChannel(func(dc *webrtc.DataChannel) {
 		client.Program.Send(systemMsg(fmt.Sprint("Connected to client " + sender + ": " + dc.Label())))
+		if dc.Label() != dataChannelName {
+			client.Program.Send(fmt.Sprintf("ignored data channel: %v", dc.Label()))
+		}
 		client.Channels[sender] = dc
 
 		client.SetupDataChannel(peerConnection, dc, sender)
@@ -425,20 +459,35 @@ func (client *SignalClient) SetupDataChannel(pc *webrtc.PeerConnection, dc *webr
 			})
 		}
 	})
+
+	dc.OnError(func(err error) {
+		dc.Close()
+	})
 }
 
+var (
+	serverUrl  string
+	serverRoom string
+	iceServers []string
+
+	cmd = &cobra.Command{
+		Run: func(cmd *cobra.Command, args []string) {
+
+			signalClient := New(serverUrl, serverRoom, iceServers)
+
+			signalClient.Program = tea.NewProgram(signalClient)
+
+			if _, err := signalClient.Program.Run(); err != nil {
+				panic("err")
+			}
+		},
+	}
+)
+
 func main() {
-	flag.Parse()
+	cmd.Flags().StringVar(&serverUrl, "server", "https://chat.jeffthecoder.xyz", "")
+	cmd.Flags().StringVar(&serverRoom, "room", "public", "")
+	cmd.Flags().StringSliceVar(&iceServers, "ice-servers", []string{"stun:nhz.jeffthecoder.xyz:3478", "stun:nhz.jeffthecoder.xyz:3479"}, "")
 
-	if flag.NArg() != 2 {
-		panic("invalid usage")
-	}
-
-	signalClient := New(flag.Arg(0), flag.Arg(1))
-
-	signalClient.Program = tea.NewProgram(signalClient)
-
-	if _, err := signalClient.Program.Run(); err != nil {
-		panic("err")
-	}
+	cmd.Execute()
 }

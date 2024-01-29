@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
-	proto "github.com/shijting/chat-signaling-server/pkg/proto/signaling"
 	"io"
 	"log"
 	"strings"
 
+	proto "github.com/shijting/chat-signaling-server/pkg/proto/signaling"
+
+	"github.com/goombaio/namegenerator"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/errgroup"
 )
@@ -17,9 +18,10 @@ import (
 type SignalingServer struct {
 	proto.UnimplementedSignalingServer
 
-	redisKeyPrefix string
+	names namegenerator.Generator
 
-	redis redis.UniversalClient
+	redisKeyPrefix string
+	redis          redis.UniversalClient
 }
 
 type Options struct {
@@ -27,6 +29,8 @@ type Options struct {
 	RedisDatabase int
 
 	RedisKeyPrefix string
+
+	NameRandomSeed int64
 }
 
 func New(options Options) (*SignalingServer, error) {
@@ -40,63 +44,61 @@ func New(options Options) (*SignalingServer, error) {
 	}
 
 	return &SignalingServer{
-		redis: redisClient,
-
+		redis:          redisClient,
 		redisKeyPrefix: options.RedisKeyPrefix,
+
+		names: namegenerator.NewNameGenerator(options.NameRandomSeed),
 	}, nil
 }
 
-func (signalingServer SignalingServer) handleStream(ctx context.Context, errGroup *errgroup.Group, stream proto.Signaling_BiuServer) func() error {
+func (signalingServer SignalingServer) handleStream(ctx context.Context, name string, errGroup *errgroup.Group, stream proto.Signaling_BiuServer) func() error {
 	return func() error {
 		for {
 			msg, err := stream.Recv()
 			if err == io.EOF {
-				log.Println("handleStream EOF")
 				return nil
-			}
-			if err != nil {
-				log.Println("handleStream error:", err)
+			} else if err == nil {
+				switch innerMsg := msg.Message.(type) {
+				case *proto.SignalingMessage_Bootstrap:
+					errGroup.Go(signalingServer.handleRedisPubSub(ctx, name, msg.Room, stream))
+				case *proto.SignalingMessage_DiscoverRequest:
+					// ignore msg.Receiver, from sender to whole channel
+					if received, err := signalingServer.redis.Publish(ctx, signalingServer.redisKeyPrefix+":"+msg.Room+":discover", msg.Sender).Result(); err != nil {
+						return err
+					} else {
+						log.Printf("peers received discover request %v -> %v(all): %v", name, msg.Room, received)
+					}
+				case *proto.SignalingMessage_DiscoverResponse:
+					if received, err := signalingServer.redis.Publish(ctx, signalingServer.redisKeyPrefix+":"+msg.Room+":discover:"+*msg.Receiver, msg.Sender).Result(); err != nil {
+						return err
+					} else {
+						log.Printf("peers received discover response %v -> %v(%v): %v", name, msg.Room, *msg.Receiver, received)
+					}
+				case *proto.SignalingMessage_SessionOffer:
+					payload := &bytes.Buffer{}
+					if err := json.NewEncoder(payload).Encode(innerMsg.SessionOffer); err != nil {
+						return err
+					}
+
+					if received, err := signalingServer.redis.Publish(ctx, signalingServer.redisKeyPrefix+":"+msg.Room+":offer:"+*msg.Receiver, payload.String()).Result(); err != nil {
+						return err
+					} else {
+						log.Printf("peers received discover response: %v", received)
+					}
+				case *proto.SignalingMessage_SessionAnswer:
+					payload := &bytes.Buffer{}
+					if err := json.NewEncoder(payload).Encode(innerMsg.SessionAnswer); err != nil {
+						return err
+					}
+
+					if received, err := signalingServer.redis.Publish(ctx, signalingServer.redisKeyPrefix+":"+msg.Room+":answer:"+*msg.Receiver, payload.String()).Result(); err != nil {
+						return err
+					} else {
+						log.Printf("peers received discover response: %v", received)
+					}
+				}
+			} else {
 				return err
-			}
-
-			switch innerMsg := msg.Message.(type) {
-			case *proto.SignalingMessage_Bootstrap:
-				errGroup.Go(signalingServer.handleRedisPubSub(ctx, msg.Sender, msg.Room, stream))
-			case *proto.SignalingMessage_DiscoverRequest:
-				// ignore msg.Receiver, from sender to whole channel
-				if received, err := signalingServer.redis.Publish(ctx, signalingServer.redisKeyPrefix+":"+msg.Room+":discover", msg.Sender).Result(); err != nil {
-					return err
-				} else {
-					log.Printf("peers received discover request %v -> %v(all): %v", msg.Sender, msg.Room, received)
-				}
-			case *proto.SignalingMessage_DiscoverResponse:
-				if received, err := signalingServer.redis.Publish(ctx, signalingServer.redisKeyPrefix+":"+msg.Room+":discover:"+*msg.Receiver, msg.Sender).Result(); err != nil {
-					return err
-				} else {
-					log.Printf("peers received discover response %v -> %v(%v): %v", msg.Sender, msg.Room, *msg.Receiver, received)
-				}
-			case *proto.SignalingMessage_SessionOffer:
-				payload := &bytes.Buffer{}
-				if err = json.NewEncoder(payload).Encode(innerMsg.SessionOffer); err != nil {
-					return err
-				}
-
-				if received, err := signalingServer.redis.Publish(ctx, signalingServer.redisKeyPrefix+":"+msg.Room+":offer:"+*msg.Receiver, payload.String()).Result(); err != nil {
-					return err
-				} else {
-					log.Printf("peers received discover response: %v", received)
-				}
-			case *proto.SignalingMessage_SessionAnswer:
-				payload := &bytes.Buffer{}
-				if err = json.NewEncoder(payload).Encode(innerMsg.SessionAnswer); err != nil {
-					return err
-				}
-
-				if received, err := signalingServer.redis.Publish(ctx, signalingServer.redisKeyPrefix+":"+msg.Room+":answer:"+*msg.Receiver, payload.String()).Result(); err != nil {
-					return err
-				} else {
-					log.Printf("peers received discover response: %v", received)
-				}
 			}
 		}
 	}
@@ -110,11 +112,8 @@ func (signalingServer SignalingServer) handleRedisPubSub(ctx context.Context, na
 			signalingServer.redisKeyPrefix+":"+room+":offer:"+name,
 			signalingServer.redisKeyPrefix+":"+room+":answer:"+name,
 		)
-
-		defer func() {
-			_ = pubsub.Unsubscribe(ctx)
-			_ = pubsub.Close()
-		}()
+		defer pubsub.Unsubscribe(ctx)
+		defer pubsub.Close()
 
 		if err := stream.Send(&proto.SignalingMessage{
 			Room:    room,
@@ -128,9 +127,9 @@ func (signalingServer SignalingServer) handleRedisPubSub(ctx context.Context, na
 		for {
 			select {
 			case <-ctx.Done():
-				// 退出
 				return nil
 			case msg := <-ch:
+
 				switch msg.Channel {
 				case signalingServer.redisKeyPrefix + ":" + room + ":discover":
 					if err := stream.Send(&proto.SignalingMessage{
@@ -194,11 +193,11 @@ func (signalingServer SignalingServer) Biu(stream proto.Signaling_BiuServer) err
 	ctx, cancel := context.WithCancel(stream.Context())
 	defer cancel()
 
+	name := signalingServer.names.Generate()
+
 	errGroup := &errgroup.Group{}
 
-	errGroup.Go(signalingServer.handleStream(ctx, errGroup, stream))
+	errGroup.Go(signalingServer.handleStream(ctx, name, errGroup, stream))
 
-	err := errGroup.Wait()
-	fmt.Println("errGroup.Wait() err:", err)
-	return err
+	return errGroup.Wait()
 }
