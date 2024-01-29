@@ -5,7 +5,7 @@ import (
 	"net"
 	"time"
 
-	signalserver "github.com/shijting/chat-signaling-server/pkg/impl/signal-server"
+	signaler "github.com/shijting/chat-signaling-server/pkg/impl/signal-server"
 	proto "github.com/shijting/chat-signaling-server/pkg/proto/signaling"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
@@ -13,11 +13,11 @@ import (
 
 var (
 	serverAddr   string
-	signalSvrOpt signalserver.Options
+	signalSvrOpt signaler.Options
 
 	cmd = &cobra.Command{
 		Run: func(cmd *cobra.Command, args []string) {
-			impl, err := signalserver.New(signalSvrOpt)
+			impl, err := signaler.New(signalSvrOpt)
 			if err != nil {
 				panic(err)
 			}
