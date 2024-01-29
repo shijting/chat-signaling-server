@@ -92,7 +92,7 @@ Type a message and press Enter to send.`)
 
 	ta.KeyMap.InsertNewline.SetEnabled(false)
 
-	transportCredential := insecure.NewCredentials()
+	transportCredential := insecure.NewCredentials() // TransportCredentials
 	parsedUrl, err := url.Parse(server)
 	if err != nil {
 		panic(err)
@@ -133,7 +133,7 @@ Type a message and press Enter to send.`)
 		Channels:  make(map[string]*webrtc.DataChannel),
 		Lock:      &sync.Mutex{},
 	}
-
+	fmt.Println(fmt.Sprintf("%v:%v", parsedUrl.Hostname(), port))
 	return client
 }
 
@@ -218,6 +218,7 @@ func (client *SignalClient) View() string {
 
 func (client *SignalClient) ConnectServer(ctx context.Context) {
 	client.Program.Send(systemMsg("Dialing to server..."))
+	fmt.Println("server: ", client.Server)
 	grpcClient, err := grpc.Dial(client.Server, grpc.WithTransportCredentials(client.Credential))
 	if err != nil {
 		panic(err)
@@ -253,6 +254,9 @@ func (client *SignalClient) HandleConnection(ctx context.Context, grpcClient *gr
 			break
 		}
 		if err != nil {
+			fmt.Println(err)
+			fmt.Println(err)
+			fmt.Println(err)
 			panic(err)
 		}
 		switch inner := msg.Message.(type) {

@@ -57,48 +57,49 @@ func (signalingServer SignalingServer) handleStream(ctx context.Context, name st
 			msg, err := stream.Recv()
 			if err == io.EOF {
 				return nil
-			} else if err == nil {
-				switch innerMsg := msg.Message.(type) {
-				case *proto.SignalingMessage_Bootstrap:
-					errGroup.Go(signalingServer.handleRedisPubSub(ctx, name, msg.Room, stream))
-				case *proto.SignalingMessage_DiscoverRequest:
-					// ignore msg.Receiver, from sender to whole channel
-					if received, err := signalingServer.redis.Publish(ctx, signalingServer.redisKeyPrefix+":"+msg.Room+":discover", msg.Sender).Result(); err != nil {
-						return err
-					} else {
-						log.Printf("peers received discover request %v -> %v(all): %v", name, msg.Room, received)
-					}
-				case *proto.SignalingMessage_DiscoverResponse:
-					if received, err := signalingServer.redis.Publish(ctx, signalingServer.redisKeyPrefix+":"+msg.Room+":discover:"+*msg.Receiver, msg.Sender).Result(); err != nil {
-						return err
-					} else {
-						log.Printf("peers received discover response %v -> %v(%v): %v", name, msg.Room, *msg.Receiver, received)
-					}
-				case *proto.SignalingMessage_SessionOffer:
-					payload := &bytes.Buffer{}
-					if err := json.NewEncoder(payload).Encode(innerMsg.SessionOffer); err != nil {
-						return err
-					}
-
-					if received, err := signalingServer.redis.Publish(ctx, signalingServer.redisKeyPrefix+":"+msg.Room+":offer:"+*msg.Receiver, payload.String()).Result(); err != nil {
-						return err
-					} else {
-						log.Printf("peers received discover response: %v", received)
-					}
-				case *proto.SignalingMessage_SessionAnswer:
-					payload := &bytes.Buffer{}
-					if err := json.NewEncoder(payload).Encode(innerMsg.SessionAnswer); err != nil {
-						return err
-					}
-
-					if received, err := signalingServer.redis.Publish(ctx, signalingServer.redisKeyPrefix+":"+msg.Room+":answer:"+*msg.Receiver, payload.String()).Result(); err != nil {
-						return err
-					} else {
-						log.Printf("peers received discover response: %v", received)
-					}
-				}
-			} else {
+			}
+			if err != nil {
 				return err
+			}
+
+			switch innerMsg := msg.Message.(type) {
+			case *proto.SignalingMessage_Bootstrap:
+				errGroup.Go(signalingServer.handleRedisPubSub(ctx, name, msg.Room, stream))
+			case *proto.SignalingMessage_DiscoverRequest:
+				// ignore msg.Receiver, from sender to whole channel
+				if received, err := signalingServer.redis.Publish(ctx, signalingServer.redisKeyPrefix+":"+msg.Room+":discover", msg.Sender).Result(); err != nil {
+					return err
+				} else {
+					log.Printf("peers received discover request %v -> %v(all): %v", name, msg.Room, received)
+				}
+			case *proto.SignalingMessage_DiscoverResponse:
+				if received, err := signalingServer.redis.Publish(ctx, signalingServer.redisKeyPrefix+":"+msg.Room+":discover:"+*msg.Receiver, msg.Sender).Result(); err != nil {
+					return err
+				} else {
+					log.Printf("peers received discover response %v -> %v(%v): %v", name, msg.Room, *msg.Receiver, received)
+				}
+			case *proto.SignalingMessage_SessionOffer:
+				payload := &bytes.Buffer{}
+				if err := json.NewEncoder(payload).Encode(innerMsg.SessionOffer); err != nil {
+					return err
+				}
+
+				if received, err := signalingServer.redis.Publish(ctx, signalingServer.redisKeyPrefix+":"+msg.Room+":offer:"+*msg.Receiver, payload.String()).Result(); err != nil {
+					return err
+				} else {
+					log.Printf("peers received discover response: %v", received)
+				}
+			case *proto.SignalingMessage_SessionAnswer:
+				payload := &bytes.Buffer{}
+				if err := json.NewEncoder(payload).Encode(innerMsg.SessionAnswer); err != nil {
+					return err
+				}
+
+				if received, err := signalingServer.redis.Publish(ctx, signalingServer.redisKeyPrefix+":"+msg.Room+":answer:"+*msg.Receiver, payload.String()).Result(); err != nil {
+					return err
+				} else {
+					log.Printf("peers received discover response: %v", received)
+				}
 			}
 		}
 	}
@@ -129,7 +130,6 @@ func (signalingServer SignalingServer) handleRedisPubSub(ctx context.Context, na
 			case <-ctx.Done():
 				return nil
 			case msg := <-ch:
-
 				switch msg.Channel {
 				case signalingServer.redisKeyPrefix + ":" + room + ":discover":
 					if err := stream.Send(&proto.SignalingMessage{
