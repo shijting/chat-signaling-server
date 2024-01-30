@@ -91,8 +91,8 @@ func New(server, room string, iceServers []string) *SignalClient {
 Type a message and press Enter to send.`)
 
 	ta.KeyMap.InsertNewline.SetEnabled(false)
-
-	transportCredential := insecure.NewCredentials() // TransportCredentials
+	// grpc.WithInsecure() 已弃用
+	transportCredential := insecure.NewCredentials()
 	parsedUrl, err := url.Parse(server)
 	if err != nil {
 		panic(err)

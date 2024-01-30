@@ -2,7 +2,6 @@ syntax = "proto3";
 
 package signaling;
 
-// 信令
 option go_package = "github.com/shijting/chat-signaling-server/pkg/proto/signaling";
 
 import "google/protobuf/empty.proto";
