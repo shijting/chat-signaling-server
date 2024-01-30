@@ -226,8 +226,8 @@ func (client *SignalClient) ConnectServer(ctx context.Context) {
 	}
 
 	client.Program.Send(systemMsg("Connecting to room..."))
-	signal_server := proto.NewSignalingClient(grpcClient)
-	stream, err := signal_server.Biu(context.Background())
+	signalServer := proto.NewSignalingClient(grpcClient)
+	stream, err := signalServer.Biu(context.Background())
 	if err != nil {
 		panic(err)
 	}
