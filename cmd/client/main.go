@@ -219,6 +219,7 @@ func (client *SignalClient) View() string {
 func (client *SignalClient) ConnectServer(ctx context.Context) {
 	client.Program.Send(systemMsg("Dialing to server..."))
 	fmt.Println("server: ", client.Server)
+	// 初始化连接池，grpcClient是一个连接池的池子，就是grpcClient 里面存放了很多个连接池，一个IP+端口就是一个池(池上池)
 	grpcClient, err := grpc.Dial(client.Server, grpc.WithTransportCredentials(client.Credential))
 	if err != nil {
 		panic(err)
